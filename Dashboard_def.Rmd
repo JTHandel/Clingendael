@@ -1,5 +1,5 @@
 ---
-title: "EU Enlargement & Reforms: Weekly Watch for Wouter Zweers"
+title: "EU Enlargement & Reforms: Weekly Watch"
 author: "Julian ter Hedde"
 date: "Updated: `r format(Sys.Date(), '%d %B %Y')`"
 output: html_document
