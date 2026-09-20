@@ -1,0 +1,247 @@
+---
+title: "EU Enlargement & Reforms: Weekly Watch"
+author: "Julian ter Hedde"
+date: "Updated: `r format(Sys.Date(), '%d %B %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library(flexdashboard)
+library(tidyRSS)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(DT)
+library(plotly)
+library(purrr)
+library(tidyr)
+library(scales)
+library(httr)
+library(jsonlite)
+library(xml2)
+
+Sys.setlocale("LC_TIME", "C")
+
+rss_sources <- tibble::tribble(
+  ~source,                   ~url,
+  "EU Observer",             "https://euobserver.com/feed/",
+  "Balkan Insight",          "https://balkaninsight.com/feed/",
+  "European Western Balkans","https://europeanwesternbalkans.com/feed/",
+  "The Loop (ECPR)",         "https://theloop.ecpr.eu/feed/",
+  "European Parliament Press","https://www.europarl.europa.eu/rss/doc/press-news/en.xml",
+  "EP Foreign Affairs Cmte", "https://www.europarl.europa.eu/rss/committee/afet/en.xml"
+)
+
+
+keywords <- c(
+  "enlargement", "accession", "candidate country", "candidate status",
+  "Western Balkans", "Ukraine EU", "Moldova EU", "Georgia EU",
+  "acquis", "membership talks", "accession negotiations",
+  "rule of law", "copenhagen criteria", "screening process",
+  "Serbia EU", "Kosovo EU", "Montenegro EU", "North Macedonia EU",
+  "Albania EU", "Bosnia EU", "Turkey EU accession"
+)
+
+keyword_regex <- paste(keywords, collapse = "|")
+
+browser_ua <- user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+fetch_feed <- function(source_name, url) {
+  tryCatch({
+    res <- GET(url, browser_ua)
+    if (status_code(res) != 200) stop(paste("HTTP", status_code(res)))
+
+    xml <- read_xml(content(res, as = "text", encoding = "UTF-8"))
+    items <- xml_find_all(xml, "//item")
+    if (length(items) == 0) stop("No items found in feed")
+
+    get_child_text <- function(item, tag) {
+      node <- xml_find_first(item, paste0(".//", tag))
+      if (inherits(node, "xml_missing")) NA_character_ else xml_text(node)
+    }
+
+    pubdate_raw   <- map_chr(items, get_child_text, tag = "pubDate")
+    pubdate_clean <- str_remove(pubdate_raw, "\\s+([A-Za-z]+|[+-]\\d{4})$")  # strip trailing tz (GMT, +0000, etc.)
+
+    tibble::tibble(
+      source      = source_name,
+      title       = map_chr(items, get_child_text, tag = "title"),
+      link        = map_chr(items, get_child_text, tag = "link"),
+      published   = parse_date_time(pubdate_clean,
+                                     orders = c("a, d b Y H:M:S", "Y-m-d H:M:S"),
+                                     tz = "UTC"),
+      description = map_chr(items, get_child_text, tag = "description")
+    )
+  }, error = function(e) {
+    message(paste("Failed to fetch:", source_name, "-", e$message))
+    tibble::tibble(source = character(), title = character(),
+                    link = character(), published = as_datetime(character()),
+                    description = character())
+  })
+}
+
+rss_articles <- map2_dfr(rss_sources$source, rss_sources$url, fetch_feed)
+
+gnews_api_key <- Sys.getenv("GNEWS_API_KEY", unset = "")
+
+fetch_gnews <- function(query, api_key, max_results = 20) {
+  if (api_key == "") return(tibble::tibble(
+    source = character(), title = character(), link = character(),
+    published = as_datetime(character()), description = character()
+  ))
+  url <- paste0("https://gnews.io/api/v4/search?q=", URLencode(query),
+                "&lang=en&max=", max_results, "&apikey=", api_key)
+  tryCatch({
+    res <- GET(url)
+    parsed <- fromJSON(content(res, as = "text", encoding = "UTF-8"))
+    if (is.null(parsed$articles) || length(parsed$articles) == 0) {
+      return(tibble::tibble(source = character(), title = character(),
+                             link = character(), published = as_datetime(character()),
+                             description = character()))
+    }
+    articles_df <- parsed$articles
+
+    if ("source.name" %in% names(articles_df)) {
+      source_names <- articles_df$source.name
+    } else if ("source" %in% names(articles_df) && is.data.frame(articles_df$source)) {
+      source_names <- articles_df$source$name
+    } else {
+      source_names <- NA_character_
+    }
+
+    tibble::tibble(
+      source      = source_names,
+      title       = articles_df$title,
+      link        = articles_df$url,
+      published   = as_datetime(articles_df$publishedAt),
+      description = articles_df$description
+    )
+  }, error = function(e) {
+    message(paste("GNews fetch failed:", e$message))
+    tibble::tibble(source = character(), title = character(),
+                    link = character(), published = as_datetime(character()),
+                    description = character())
+  })
+}
+
+
+rss_articles <- map2_dfr(rss_sources$source, rss_sources$url, fetch_feed)
+
+
+fetch_gnews <- function(query, api_key, max_results = 20) {
+  if (api_key == "") return(tibble::tibble(
+    source = character(), title = character(), link = character(),
+    published = as_datetime(character()), description = character()
+  ))
+  url <- paste0("https://gnews.io/api/v4/search?q=", URLencode(query),
+                "&lang=en&max=", max_results, "&apikey=", api_key)
+  tryCatch({
+    res <- GET(url)
+    parsed <- fromJSON(content(res, as = "text", encoding = "UTF-8"))
+    if (is.null(parsed$articles) || length(parsed$articles) == 0) {
+      return(tibble::tibble(source = character(), title = character(),
+                             link = character(), published = as_datetime(character()),
+                             description = character()))
+    }
+    articles_df <- parsed$articles
+
+    # GNews sometimes returns 'source' as a flattened "source.name" column,
+    # and sometimes as a nested data frame column called "source". Handle both.
+    if ("source.name" %in% names(articles_df)) {
+      source_names <- articles_df$source.name
+    } else if ("source" %in% names(articles_df) && is.data.frame(articles_df$source)) {
+      source_names <- articles_df$source$name
+    } else {
+      source_names <- NA_character_
+    }
+
+    tibble::tibble(
+      source      = source_names,
+      title       = articles_df$title,
+      link        = articles_df$url,
+      published   = as_datetime(articles_df$publishedAt),
+      description = articles_df$description
+    )
+  }, error = function(e) {
+    message(paste("GNews fetch failed:", e$message))
+    tibble::tibble(source = character(), title = character(),
+                    link = character(), published = as_datetime(character()),
+                    description = character())
+  })
+}
+
+gnews_articles <- bind_rows(
+  fetch_gnews("EU enlargement", gnews_api_key, max_results = 10),
+  fetch_gnews("EU accession Western Balkans", gnews_api_key, max_results = 10)
+)
+
+all_articles <- bind_rows(rss_articles, gnews_articles) %>%
+  distinct(title, .keep_all = TRUE) %>%
+  filter(!is.na(published)) %>%
+  filter(published >= (Sys.time() - days(7))) %>%
+  filter(str_detect(str_to_lower(paste(title, description)),
+                     str_to_lower(keyword_regex))) %>%
+  arrange(desc(published))
+
+n_articles <- nrow(all_articles)
+n_sources  <- n_distinct(all_articles$source)
+
+```
+
+
+```{r}
+valueBox(n_articles, icon = "fa-newspaper", color = "primary")
+```
+
+```{r}
+valueBox(n_sources, icon = "fa-globe", color = "info")
+```
+
+
+```{r}
+valueBox(format(Sys.Date() - 7, "%d %b"), icon = "fa-calendar", color = "success")
+```
+
+
+```{r}
+valueBox(format(Sys.Date() - 7, "%d %b"), icon = "fa-calendar", color = "success")
+```
+
+```{r}
+if (n_articles > 0) {
+  p <- all_articles %>%
+    count(source, sort = TRUE) %>%
+    plot_ly(x = ~reorder(source, n), y = ~n, type = "bar") %>%
+    layout(xaxis = list(title = ""), yaxis = list(title = "Articles"))
+  p
+} else {
+  plotly_empty()
+}
+```
+
+
+```{r}
+if (n_articles > 0) {
+  all_articles %>%
+    mutate(day = as_date(published)) %>%
+    count(day) %>%
+    plot_ly(x = ~day, y = ~n, type = "scatter", mode = "lines+markers") %>%
+    layout(xaxis = list(title = ""), yaxis = list(title = "Articles"))
+} else {
+  plotly_empty()
+}
+```
+
+
+```{r}
+all_articles %>%
+  mutate(
+    published = format(published, "%d %b, %H:%M"),
+    title = paste0("<a href='", link, "' target='_blank'>", title, "</a>")
+  ) %>%
+  select(Date = published, Source = source, Headline = title) %>%
+  datatable(escape = FALSE, rownames = FALSE,
+            options = list(pageLength = 15, order = list(list(0, "desc"))))
+```
